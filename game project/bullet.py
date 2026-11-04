@@ -1,17 +1,12 @@
 import pygame
+from utils import get_cached_image
 
 class Bullet(pygame.sprite.Sprite):
     def __init__(self, x, y):
         super().__init__()
-
-        # Dùng ảnh
-        self.image = pygame.image.load("assets/bullet.png").convert_alpha()
-        self.image = pygame.transform.scale(self.image, (20, 40))  # resize nếu cần
-        
-
-        # Tạo vị trí ban đầu
+        self.image = get_cached_image("bullet.png", size=(20, 40), convert_alpha=True)
         self.rect = self.image.get_rect(center=(x, y))
-        self.speed = -10  # Bay lên (trục Y giảm)
+        self.speed = -10
 
     def update(self):
         self.rect.y += self.speed
