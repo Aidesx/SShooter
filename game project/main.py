@@ -76,7 +76,8 @@ setting_return_state = STATE_MENU
 play_mode = "single"
 coop_host = CoopHost(port=DEFAULT_PORT)
 coop_client = CoopClient()
-local_lan_ip = get_local_ip()
+local_lan_ip = "127.0.0.1"
+host_status_msg = ""
 join_ip_text = "127.0.0.1"
 join_error_msg = ""
 
@@ -130,11 +131,21 @@ def reset_game(mode="single"):
         player = Player(x=WIDTH // 2 - 25, y=850)
         player2 = None
 
+def start_host_room():
+    global game_state, host_status_msg, local_lan_ip
+    try:
+        coop_host.start()
+        local_lan_ip = get_local_ip()
+        host_status_msg = "Đang chờ người chơi 2…"
+    except OSError:
+        host_status_msg = "Không mở được cổng phòng."
+    game_state = STATE_HOST_WAIT
+
+
 # Hỗ trợ mở thẳng chế độ Host hoặc Join nếu chạy từ server.py / client.py
 start_env = os.environ.get("COOP_START_MODE", "")
 if start_env == "host":
-    coop_host.start()
-    game_state = STATE_HOST_WAIT
+    start_host_room()
 elif start_env == "join":
     game_state = STATE_JOIN_INPUT
 
@@ -248,12 +259,18 @@ while running:
 
     elif game_state == STATE_HOST_WAIT:
         show_host_waiting(canvas, font, big_font, local_lan_ip, DEFAULT_PORT,
-                          "Đang chờ Người chơi 2 kết nối...", WIDTH, HEIGHT)
+                          host_status_msg, WIDTH, HEIGHT)
         if coop_host.connected:
             reset_game(mode="host")
             game_state = STATE_PLAYING
 
     elif game_state == STATE_JOIN_INPUT:
+        if coop_client.connected:
+            client_known_explosions.clear()
+            reset_game(mode="client")
+            game_state = STATE_PLAYING
+        elif coop_client.connect_error:
+            join_error_msg = "Không kết nối được tới Host!"
         show_join_prompt(canvas, font, big_font, join_ip_text, join_error_msg, WIDTH, HEIGHT)
 
     elif game_state == STATE_SETTING:
@@ -575,8 +592,7 @@ while running:
                     reset_game(mode="single")
                     game_state = STATE_PLAYING
                 elif event.key == pygame.K_h or (event.key == pygame.K_RETURN and selected_menu_idx == 1):
-                    coop_host.start()
-                    game_state = STATE_HOST_WAIT
+                    start_host_room()
                 elif event.key == pygame.K_j or (event.key == pygame.K_RETURN and selected_menu_idx == 2):
                     join_error_msg = ""
                     game_state = STATE_JOIN_INPUT
@@ -600,13 +616,10 @@ while running:
                     game_state = STATE_MENU
                 elif event.key == pygame.K_BACKSPACE:
                     join_ip_text = join_ip_text[:-1]
-                elif event.key == pygame.K_RETURN:
+                elif event.key == pygame.K_RETURN and not coop_client.connecting:
                     try:
                         target_ip = join_ip_text.strip() or "127.0.0.1"
                         coop_client.connect(target_ip, DEFAULT_PORT)
-                        client_known_explosions.clear()
-                        reset_game(mode="client")
-                        game_state = STATE_PLAYING
                     except Exception:
                         join_error_msg = "Không kết nối được tới Host!"
                 else:
@@ -681,8 +694,7 @@ while running:
                             reset_game(mode="single")
                             game_state = STATE_PLAYING
                         elif act == "host":
-                            coop_host.start()
-                            game_state = STATE_HOST_WAIT
+                            start_host_room()
                         elif act == "join":
                             join_error_msg = ""
                             game_state = STATE_JOIN_INPUT

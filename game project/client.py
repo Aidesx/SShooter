@@ -1,80 +1,154 @@
+import json
 import os
 import socket
 import threading
-import json
-from server import DEFAULT_PORT
+
+from server import DEFAULT_PORT, IO_TIMEOUT, close_socket, read_messages
+
+
+def is_game_int(value):
+    return type(value) is int and -(2**31) <= value < 2**31
+
+
+def is_counter(value):
+    return type(value) is int and value >= 0
+
+
+def valid_snapshot(message):
+    """Kiểm tra các trường Client dùng để vẽ trước khi nhận snapshot."""
+    if message.get("game_state") not in ("playing", "gameover", "setting"):
+        return False
+    for name in ("score", "level", "round"):
+        if name in message and not is_counter(message[name]):
+            return False
+    for name in ("p1", "p2"):
+        player = message.get(name)
+        if not isinstance(player, dict) or any(not is_game_int(player.get(k)) for k in ("x", "y")):
+            return False
+        if not is_counter(player.get("hp")):
+            return False
+        if "max_hp" in player and (not is_counter(player["max_hp"]) or player["max_hp"] == 0):
+            return False
+    boss = message.get("boss")
+    if boss is not None:
+        if not isinstance(boss, dict) or any(not is_game_int(boss.get(k)) for k in ("x", "y")):
+            return False
+        if any(not is_counter(boss.get(k)) for k in ("hp", "max_hp")):
+            return False
+        if "sprite" in boss and not isinstance(boss["sprite"], str):
+            return False
+    for name, count in (("bullets", 2), ("enemies", 2), ("boss_bullets", 2), ("explosions", 3)):
+        entries = message.get(name, [])
+        if not isinstance(entries, list):
+            return False
+        for entry in entries:
+            if not isinstance(entry, list) or len(entry) != count:
+                return False
+            if any(not is_game_int(n) for n in entry):
+                return False
+    return True
+
 
 class CoopClient:
-    """
-    Quản lý kết nối Máy khách (Client - Player 2) cho chế độ Co-op 2 người chơi.
-    Gửi thao tác phím lên Host và nhận bản tin Snapshot trạng thái thế giới qua luồng nền.
-    """
+    """Kết nối, gửi input và nhận snapshot ngoài vòng lặp Pygame."""
+
     def __init__(self):
         self.sock = None
         self.connected = False
-        self.running = False
+        self.connecting = False
+        self.connect_error = False
         self.latest_state = None
-        self._lock = threading.Lock()
+        self._input_to_send = None
+        self._changed = threading.Condition()
 
     def connect(self, host_ip="127.0.0.1", port=DEFAULT_PORT, timeout=3.0):
         self.stop()
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect((host_ip.strip(), port))
-        sock.settimeout(None)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.sock = sock
-        self.connected = True
-        self.running = True
-        threading.Thread(target=self._listen_loop, daemon=True).start()
-        return True
+        with self._changed:
+            self.sock = sock
+            self.connecting = True
+        threading.Thread(
+            target=self._connect_loop, args=(sock, host_ip, port, timeout), daemon=True
+        ).start()
 
-    def _listen_loop(self):
-        buffer = ""
-        while self.running and self.sock:
-            try:
-                chunk = self.sock.recv(4096)
-                if not chunk:
-                    break
-                buffer += chunk.decode("utf-8", errors="ignore")
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    line = line.strip()
-                    if line:
-                        data = json.loads(line)
-                        with self._lock:
-                            self.latest_state = data
-            except Exception:
-                break
+    def _connect_loop(self, sock, host_ip, port, timeout):
+        try:
+            sock.settimeout(timeout)
+            sock.connect((host_ip.strip(), port))
+            sock.settimeout(IO_TIMEOUT)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            self._disconnect(sock, failed_to_connect=True)
+            return
+        with self._changed:
+            if self.sock is not sock:
+                return
+            self.connected = True
+            self.connecting = False
+        threading.Thread(target=self._send_loop, args=(sock,), daemon=True).start()
+        try:
+            for message in read_messages(sock, max_line=65536):
+                if not valid_snapshot(message):
+                    continue
+                with self._changed:
+                    if self.sock is not sock:
+                        return
+                    self.latest_state = message
+        except OSError:
+            pass
+        finally:
+            self._disconnect(sock)
+
+    def _send_loop(self, sock):
+        try:
+            while True:
+                with self._changed:
+                    self._changed.wait_for(
+                        lambda: self.sock is not sock or self._input_to_send is not None
+                    )
+                    if self.sock is not sock:
+                        return
+                    commands = self._input_to_send
+                    self._input_to_send = None
+                sock.sendall((json.dumps(commands) + "\n").encode("utf-8"))
+        except OSError:
+            self._disconnect(sock)
+
+    def _disconnect(self, sock, failed_to_connect=False):
+        with self._changed:
+            if self.sock is not sock:
+                return
+            self._clear_connection()
+            self.connect_error = failed_to_connect
+            self._changed.notify_all()
+        close_socket(sock)
+
+    def _clear_connection(self):
+        self.sock = None
         self.connected = False
+        self.connecting = False
+        self.connect_error = False
+        self.latest_state = None
+        self._input_to_send = None
 
     def get_latest_state(self):
-        with self._lock:
+        with self._changed:
             return self.latest_state
 
     def send_input(self, move_list, shoot_bool):
-        if not self.connected or not self.sock:
-            return
-        try:
-            msg = (json.dumps({"move": move_list, "shoot": bool(shoot_bool)}) + "\n").encode("utf-8")
-            self.sock.sendall(msg)
-        except Exception:
-            self.connected = False
+        with self._changed:
+            if self.connected:
+                self._input_to_send = {"move": list(move_list), "shoot": bool(shoot_bool)}
+                self._changed.notify_all()
 
     def stop(self):
-        self.running = False
-        self.connected = False
-        if self.sock:
-            try:
-                self.sock.close()
-            except Exception:
-                pass
-            self.sock = None
-        with self._lock:
-            self.latest_state = None
+        with self._changed:
+            sock = self.sock
+            self._clear_connection()
+            self._changed.notify_all()
+        close_socket(sock)
 
 
 if __name__ == "__main__":
-    # Cho phép chạy trực tiếp python client.py để mở game vào thẳng chế độ Vào Phòng (Join)
     os.environ["COOP_START_MODE"] = "join"
     import main
