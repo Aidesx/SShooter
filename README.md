@@ -10,7 +10,7 @@ A classic 2D vertical arcade space shooter built with Python and Pygame. Feature
 - **Boss Battles**: Multi-phase encounters with custom bullet patterns, enraged states, and minion spawning.
 - **Adaptive Display**: Virtual Canvas (412x915) with automatic monitor resolution detection to fit any screen without distortion.
 - **Co-op Multiplayer**: 2-player local network (LAN) co-op mode based on an integrated host-client architecture.
-- **Settings & Persistence**: In-game audio sliders, custom keybinding remapping, auto-fire, screen shake, and FPS counter saved automatically.
+- **Settings & Persistence**: In-game audio sliders, custom keybinding remapping, screen shake, and FPS counter saved automatically.
 
 ---
 
@@ -43,7 +43,7 @@ Default keybindings (fully customizable in the in-game Settings menu):
 | Action | Default Key |
 | :--- | :--- |
 | **Move** | Arrow keys (`↑`, `↓`, `←`, `→`) |
-| **Fire** | `Space` |
+| **Fire one shot** | Press `Space` (or `J` with the WASD preset) once per shot. The starting cooldown is 350 ms. |
 | **Settings / Pause** | `P` or click the Gear icon |
 | **Back / Exit** | `Esc` |
 
@@ -53,5 +53,5 @@ Default keybindings (fully customizable in the in-game Settings menu):
 
 - **Phan Hữu Gia Huy** ([@Aidesx](https://github.com/Aidesx)) - Core gameplay, original project development, assets integration, and logic refactoring.
 
-
+  
 ---
