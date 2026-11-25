@@ -1,6 +1,6 @@
 import os
 import pygame
-from utils import get_cached_image, BASE_WIDTH, BASE_HEIGHT
+from utils import get_cached_image, BASE_WIDTH, BASE_HEIGHT, BALANCE_HZ
 
 UPGRADES = {
     "damage": ("shot_damage", 5, 6, "sát thương/phát"),
@@ -22,6 +22,7 @@ class Player(pygame.sprite.Sprite):
         filename = os.path.basename(image_path) if image_path else "player.png"
         self.image = get_cached_image(filename, size=(50, 50), convert_alpha=True)
         self.rect = self.image.get_rect(topleft=(x, y))
+        self.remainder_x = self.remainder_y = 0.0
         self.speed = speed
         self.max_health = max_health
         self.health = max_health
@@ -60,7 +61,7 @@ class Player(pygame.sprite.Sprite):
             "stats": {key: getattr(self, stat) for key, (stat, _change, _cost, _unit) in UPGRADES.items()},
         }
 
-    def handle_input(self, keys, max_w=BASE_WIDTH, max_h=BASE_HEIGHT, key_bindings=None):
+    def handle_input(self, keys, max_w=BASE_WIDTH, max_h=BASE_HEIGHT, key_bindings=None, step=1.0):
         """
         Xử lý di chuyển thống nhất cho cả phím bấm trực tiếp (hỗ trợ Custom Keybindings)
         và danh sách lệnh chuỗi qua mạng (["LEFT", "RIGHT", "UP", "DOWN"]).
@@ -81,22 +82,16 @@ class Player(pygame.sprite.Sprite):
             move_up = bool(keys[k_up])
             move_down = bool(keys[k_down])
 
-        if move_left:
-            self.rect.x -= self.speed
-        if move_right:
-            self.rect.x += self.speed
-        if move_up:
-            self.rect.y -= self.speed
-        if move_down:
-            self.rect.y += self.speed
+        distance = self.speed * step
+        x = self.rect.x + self.remainder_x + (move_right - move_left) * distance
+        y = self.rect.y + self.remainder_y + (move_down - move_up) * distance
+        x = max(0, min(x, max_w - self.rect.width))
+        y = max(0, min(y, max_h - self.rect.height))
+        self.rect.topleft = round(x), round(y)
+        self.remainder_x, self.remainder_y = x - self.rect.x, y - self.rect.y
 
-        # Giới hạn trong khung hình chuẩn
-        self.rect.x = max(0, min(self.rect.x, max_w - self.rect.width))
-        self.rect.y = max(0, min(self.rect.y, max_h - self.rect.height))
-
-    def update(self):
-        if self.flash_timer > 0:
-            self.flash_timer -= 1
+    def update(self, elapsed_ms=1000 / BALANCE_HZ):
+        self.flash_timer = max(0, self.flash_timer - elapsed_ms)
 
     def draw(self, screen):
         screen.blit(self.image, self.rect)

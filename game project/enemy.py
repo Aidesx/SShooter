@@ -23,9 +23,9 @@ class Enemy(pygame.sprite.Sprite):
         self.y = float(self.rect.y)
         self.missed = False  
 
-    def update(self):
-        self.y += self.speed
+    def update(self, step=1.0):
+        self.y += self.speed * step
         self.rect.y = round(self.y)
-        if self.rect.top >= self.max_y:
+        if self.y >= self.max_y - 1e-9:
             self.missed = True   
             self.kill()

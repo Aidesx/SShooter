@@ -1,5 +1,5 @@
 import pygame
-from utils import get_cached_image, BASE_WIDTH, BASE_HEIGHT
+from utils import get_cached_image, BASE_WIDTH, BASE_HEIGHT, BALANCE_HZ
 
 class Boss(pygame.sprite.Sprite):
     def __init__(self, screen_w=BASE_WIDTH, screen_h=BASE_HEIGHT, boss_tier=1):
@@ -15,6 +15,7 @@ class Boss(pygame.sprite.Sprite):
 
         self.image = get_cached_image(self.current_sprite, size=(120, 120), convert_alpha=True).copy()
         self.rect = self.image.get_rect(center=(screen_w // 2, 100))
+        self.x, self.y = self.rect.topleft
         
         extra = self.boss_tier - 1
         self.max_health = 100 + extra * 60 + extra * extra * 12
@@ -39,16 +40,20 @@ class Boss(pygame.sprite.Sprite):
     def _refresh_base_image(self):
         self.image = get_cached_image(self.current_sprite, size=(120, 120), convert_alpha=True).copy()
 
-    def update(self, elapsed_ms=0):
-        # Di chuyển X
-        self.rect.x += self.speed_x
-        if self.rect.left < 0 or self.rect.right > self.screen_w:
+    def update(self, elapsed_ms=1000 / BALANCE_HZ):
+        step = elapsed_ms * BALANCE_HZ / 1000
+        self.x += self.speed_x * step
+        right = self.screen_w - self.rect.width
+        if self.x < 0 or self.x > right:
+            self.x = -self.x if self.x < 0 else 2 * right - self.x
             self.speed_x = -self.speed_x
-            
-        # Di chuyển Y
-        self.rect.y += self.speed_y * self.direction_y
-        if self.rect.top < 10 or self.rect.bottom > 220:
+
+        self.y += self.speed_y * self.direction_y * step
+        bottom = 220 - self.rect.height
+        if self.y < 10 or self.y > bottom:
+            self.y = 20 - self.y if self.y < 10 else 2 * bottom - self.y
             self.direction_y *= -1
+        self.rect.topleft = round(self.x), round(self.y)
             
         # Chuyển sang Phase 2 (Nổi giận) khi máu <= 50%
         if self.health <= self.max_health // 2 and self.phase == 1:
@@ -60,7 +65,7 @@ class Boss(pygame.sprite.Sprite):
             self.spawn_cooldown = max(2500, int(self.spawn_cooldown * 0.8))
             
         # Chỉ tính thời gian ở trong trận để giữ nguyên nhịp khi tạm dừng.
-        self.bullets.update()
+        self.bullets.update(step)
         self.shot_elapsed += elapsed_ms
         if self.shot_elapsed >= self.shot_cooldown:
             self.shoot()
@@ -102,9 +107,11 @@ class BossBullet(pygame.sprite.Sprite):
         self.max_y = max_y
         self.image = get_cached_image("boss_bullet.png", size=(10, 20), convert_alpha=True)
         self.rect = self.image.get_rect(center=(x, y))
+        self.y = float(self.rect.y)
         self.speed = 6
         
-    def update(self):
-        self.rect.y += self.speed
+    def update(self, step=1.0):
+        self.y += self.speed * step
+        self.rect.y = round(self.y)
         if self.rect.top > self.max_y:
             self.kill()

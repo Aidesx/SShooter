@@ -17,6 +17,7 @@ SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 # Kích thước logic thiết kế gốc của trò chơi
 BASE_WIDTH = 412
 BASE_HEIGHT = 915
+BALANCE_HZ = 60  # Đơn vị gốc của các chỉ số tốc độ trong cấu hình màn và Sprite.
 
 # Bộ nhớ đệm (RAM Cache) cho hình ảnh để tránh đọc ổ cứng lặp lại mỗi frame
 _IMAGE_CACHE = {}

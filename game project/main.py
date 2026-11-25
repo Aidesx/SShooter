@@ -18,7 +18,7 @@ from boss import Boss
 from server import CoopHost, DEFAULT_PORT
 from client import CoopClient
 from utils import (
-    BASE_WIDTH, BASE_HEIGHT,
+    BASE_WIDTH, BASE_HEIGHT, BALANCE_HZ,
     get_default_settings, load_settings, save_settings,
     get_asset_path, get_cached_image, get_local_ip, load_level_config,
     get_auto_resolution, current_desktop, apply_display_mode, calculate_viewport, screen_to_canvas,
@@ -41,7 +41,11 @@ canvas = pygame.Surface((WIDTH, HEIGHT))
 pygame.display.set_caption("Bắn máy bay")
 pygame.display.set_icon(get_cached_image("icon.png", convert_alpha=True))
 
-FPS = 60
+FPS = BALANCE_HZ
+MAX_STEP_MS = 17
+MAX_STEPS_PER_FRAME = 8
+MAX_BACKLOG_MS = 250
+pending_game_ms = 0
 frame_ms = 0
 
 # Âm thanh
@@ -127,17 +131,17 @@ host_status_msg = ""
 # Biến game
 score = 0
 level = 1
-FIRST_SPAWN_FRAMES = 36
-STAGE_BREAK_FRAMES = 84
+FIRST_SPAWN_MS = 600
+STAGE_BREAK_MS = 1400
 POINTS_PER_CREDIT = 10
-spawn_in_frames = FIRST_SPAWN_FRAMES
+spawn_left_ms = FIRST_SPAWN_MS
 spawned_enemies = 0
 stage_start_score = 0
 last_stage_points = None
 last_guest_upgrade_id = 0
 client_upgrade_id = 0
 pending_upgrade_id = None
-HEALTH_FLASH_DURATION = 15  # frame
+HEALTH_FLASH_DURATION = 250  # ms
 
 # Nhóm đối tượng
 player = Player(x=WIDTH // 2 - 25, y=850)
@@ -161,13 +165,13 @@ ui = None
 
 def reset_game(mode="single"):
     global score, level, player, player2, loaded_background, loaded_level_number
-    global spawn_in_frames, spawned_enemies, stage_start_score, last_stage_points
+    global spawn_left_ms, spawned_enemies, stage_start_score, last_stage_points
     global boss_defeated, play_mode, round_number
     global last_guest_upgrade_id, pending_upgrade_id
     play_mode = mode
     score = 0
     level = 1
-    spawn_in_frames = FIRST_SPAWN_FRAMES
+    spawn_left_ms = FIRST_SPAWN_MS
     spawned_enemies = 0
     stage_start_score = 0
     last_stage_points = None
@@ -636,7 +640,7 @@ while running:
                     client_round = st.get("round")
                     explosions.empty()
                 if not host_paused:
-                    explosions.update()
+                    explosions.update(frame_ms)
                 for seq_id, ex_x, ex_y in st.get("explosions", []):
                     if seq_id > client_last_explosion:
                         client_last_explosion = seq_id
@@ -668,101 +672,111 @@ while running:
                 if coop_host.take_shot():
                     fire_ship(player2)
 
-            if player.health > 0 and keys is not None:
-                player.handle_input(keys, WIDTH, HEIGHT, key_bindings=k_cfg)
-            player.update()
+            # Giữ nhịp thiết kế ở 60 Hz. Xét va chạm sau từng bước, vẽ một lần.
+            pending_game_ms = min(MAX_BACKLOG_MS, pending_game_ms + frame_ms)
+            for _ in range(MAX_STEPS_PER_FRAME):
+                if not pending_game_ms:
+                    break
+                step_ms = min(MAX_STEP_MS, pending_game_ms)
+                pending_game_ms -= step_ms
+                step = step_ms * BALANCE_HZ / 1000
+                if player.health > 0 and keys is not None:
+                    player.handle_input(keys, WIDTH, HEIGHT, key_bindings=k_cfg, step=step)
+                player.update(step_ms)
 
-            # Điều khiển Player 2 (nếu ở chế độ Host Co-op)
-            if play_mode == "host" and player2 is not None:
-                if player2.health > 0:
-                    player2.handle_input(guest_move, WIDTH, HEIGHT)
-                player2.update()
+                # Điều khiển Player 2 (nếu ở chế độ Host Co-op)
+                if play_mode == "host" and player2 is not None:
+                    if player2.health > 0:
+                        player2.handle_input(guest_move, WIDTH, HEIGHT, step=step)
+                    player2.update(step_ms)
 
-            bullets.update()
-            explosions.update()
-            escaped = 0
-            for enemy in enemies:
-                enemy.update()
-                escaped += enemy.missed
-            if escaped:
-                # Cùng luật ở Chơi đơn và Co-op. Client nhận HP do Host tính.
-                damage_player(player, escaped)
-                damage_player(player2, escaped)
-            spawn_in_frames = max(0, spawn_in_frames - 1)
+                bullets.update(step)
+                explosions.update(step_ms)
+                escaped = 0
+                for enemy in enemies:
+                    enemy.update(step)
+                    escaped += enemy.missed
+                if escaped:
+                    # Cùng luật ở Chơi đơn và Co-op. Client nhận HP do Host tính.
+                    damage_player(player, escaped)
+                    damage_player(player2, escaped)
+                spawn_left_ms = max(0, spawn_left_ms) - step_ms
 
-            # Boss ở mỗi màn chia hết cho 5. Điểm không đẩy trận sang màn khác.
-            boss_stage = level % 5 == 0
-            if boss_stage and spawn_in_frames <= 0 and not boss_defeated and not boss_group:
-                boss_group.add(Boss(WIDTH, HEIGHT, boss_tier=level // 5))
-                last_stage_points = None
+                # Boss ở mỗi màn chia hết cho 5. Điểm không đẩy trận sang màn khác.
+                boss_stage = level % 5 == 0
+                if boss_stage and spawn_left_ms <= 0 and not boss_defeated and not boss_group:
+                    boss_group.add(Boss(WIDTH, HEIGHT, boss_tier=level // 5))
+                    last_stage_points = None
 
-            if boss_group:
-                boss_group.update(min(frame_ms, 50))
-                for b in list(boss_group):
-                    if b.spawn_enemy:
-                        if len(enemies) < level_data.max_enemies:
-                            spawn_enemy(level_data, (b.rect.centerx, b.rect.bottom))
-                        b.spawn_enemy = False
+                if boss_group:
+                    boss_group.update(step_ms)
+                    for b in list(boss_group):
+                        if b.spawn_enemy:
+                            if len(enemies) < level_data.max_enemies:
+                                spawn_enemy(level_data, (b.rect.centerx, b.rect.bottom))
+                            b.spawn_enemy = False
 
-                    if player.health > 0 and pygame.sprite.spritecollide(player, b.bullets, True):
-                        damage_player(player, b.attack_damage)
-                    if play_mode == "host" and player2 and player2.health > 0:
-                        if pygame.sprite.spritecollide(player2, b.bullets, True):
+                        if player.health > 0 and pygame.sprite.spritecollide(player, b.bullets, True):
+                            damage_player(player, b.attack_damage)
+                        if play_mode == "host" and player2 and player2.health > 0:
+                            if pygame.sprite.spritecollide(player2, b.bullets, True):
+                                damage_player(player2, b.attack_damage)
+
+                        if player.health > 0 and b.rect.colliderect(player.rect) and player.flash_timer == 0:
+                            damage_player(player, b.attack_damage)
+                        if play_mode == "host" and player2 and player2.health > 0 and b.rect.colliderect(player2.rect) and player2.flash_timer == 0:
                             damage_player(player2, b.attack_damage)
 
-                    if player.health > 0 and b.rect.colliderect(player.rect) and player.flash_timer == 0:
-                        damage_player(player, b.attack_damage)
-                    if play_mode == "host" and player2 and player2.health > 0 and b.rect.colliderect(player2.rect) and player2.flash_timer == 0:
-                        damage_player(player2, b.attack_damage)
+                    hits = pygame.sprite.groupcollide(boss_group, bullets, False, True)
+                    for b, hit_bullets in hits.items():
+                        b.take_damage(sum(bullet.damage for bullet in hit_bullets))
+                        if b.health <= 0:
+                            record_explosion(b.rect.center)
+                            boss_group.remove(b)
+                            boss_defeated = True
+                            score += b.score_value
+                            player.health = min(player.max_health, player.health + 3)
+                            if play_mode == "host" and player2:
+                                player2.health = min(player2.max_health, player2.health + 3)
+                elif (not boss_stage and spawn_left_ms <= 0
+                      and spawned_enemies < level_data.enemy_count and len(enemies) < level_data.max_enemies):
+                    spawn_enemy(level_data)
+                    spawned_enemies += 1
+                    spawn_left_ms += round(level_data.enemy_spawn_rate * 1000 / BALANCE_HZ)
+                    last_stage_points = None
 
-                hits = pygame.sprite.groupcollide(boss_group, bullets, False, True)
-                for b, hit_bullets in hits.items():
-                    b.take_damage(sum(bullet.damage for bullet in hit_bullets))
-                    if b.health <= 0:
-                        record_explosion(b.rect.center)
-                        boss_group.remove(b)
-                        boss_defeated = True
-                        score += b.score_value
-                        player.health = min(player.max_health, player.health + 3)
-                        if play_mode == "host" and player2:
-                            player2.health = min(player2.max_health, player2.health + 3)
-            elif (not boss_stage and spawn_in_frames <= 0
-                  and spawned_enemies < level_data.enemy_count and len(enemies) < level_data.max_enemies):
-                spawn_enemy(level_data)
-                spawned_enemies += 1
-                spawn_in_frames = level_data.enemy_spawn_rate
-                last_stage_points = None
+                hits = pygame.sprite.groupcollide(enemies, bullets, False, True)
+                for enemy, hit_bullets in hits.items():
+                    enemy.health -= sum(bullet.damage for bullet in hit_bullets)
+                    if enemy.health <= 0:
+                        enemy.kill()
+                        score += enemy.score_value
+                        record_explosion(enemy.rect.center)
 
-            hits = pygame.sprite.groupcollide(enemies, bullets, False, True)
-            for enemy, hit_bullets in hits.items():
-                enemy.health -= sum(bullet.damage for bullet in hit_bullets)
-                if enemy.health <= 0:
-                    enemy.kill()
-                    score += enemy.score_value
-                    record_explosion(enemy.rect.center)
+                for ship in (player, player2):
+                    if ship and ship.health > 0:
+                        touched = pygame.sprite.spritecollide(ship, enemies, True)
+                        if touched:
+                            damage_player(ship, max(enemy.contact_damage for enemy in touched))
 
-            for ship in (player, player2):
-                if ship and ship.health > 0:
-                    touched = pygame.sprite.spritecollide(ship, enemies, True)
-                    if touched:
-                        damage_player(ship, max(enemy.contact_damage for enemy in touched))
-
-            wave_finished = boss_defeated if boss_stage else spawned_enemies >= level_data.enemy_count
-            if player.health <= 0 and (player2 is None or player2.health <= 0):
-                game_state = STATE_GAMEOVER
-            elif wave_finished and not enemies:
-                last_stage_points = score - stage_start_score
-                reward = last_stage_points // POINTS_PER_CREDIT
-                player.credits += reward
-                if player2:
-                    player2.credits += reward
-                stage_start_score = score
-                level += 1
-                spawned_enemies = 0
-                boss_defeated = False
-                spawn_in_frames = STAGE_BREAK_FRAMES
-                bullets.empty()
-                game_state = STATE_UPGRADE
+                wave_finished = boss_defeated if boss_stage else spawned_enemies >= level_data.enemy_count
+                if player.health <= 0 and (player2 is None or player2.health <= 0):
+                    game_state = STATE_GAMEOVER
+                    break
+                elif wave_finished and not enemies:
+                    last_stage_points = score - stage_start_score
+                    reward = last_stage_points // POINTS_PER_CREDIT
+                    player.credits += reward
+                    if player2:
+                        player2.credits += reward
+                    stage_start_score = score
+                    level += 1
+                    spawned_enemies = 0
+                    boss_defeated = False
+                    spawn_left_ms = STAGE_BREAK_MS
+                    bullets.empty()
+                    game_state = STATE_UPGRADE
+                    break
 
             p1_flash = player.flash_timer > 0
             p2_flash = bool(player2 and player2.flash_timer > 0)
@@ -1116,9 +1130,11 @@ while running:
     elapsed_ms = clock.tick(FPS)
     if game_state != STATE_PLAYING:
         frame_ms = 0
+        pending_game_ms = 0
     elif entered_play:
         # Chỉ tính phần của frame sau khi bắt đầu hoặc tiếp tục trận.
         frame_ms = min(elapsed_ms, pygame.time.get_ticks() - resumed_at)
+        pending_game_ms = 0
     else:
         frame_ms = elapsed_ms
 
