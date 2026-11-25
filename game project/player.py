@@ -19,7 +19,8 @@ class Player(pygame.sprite.Sprite):
         Xử lý di chuyển thống nhất cho cả phím bấm trực tiếp (hỗ trợ Custom Keybindings)
         và danh sách lệnh chuỗi qua mạng (["LEFT", "RIGHT", "UP", "DOWN"]).
         """
-        if isinstance(keys, (list, tuple, set)):
+        is_network_input = isinstance(keys, (list, tuple, set)) and not isinstance(keys, pygame.key.ScancodeWrapper)
+        if is_network_input:
             move_left = "LEFT" in keys
             move_right = "RIGHT" in keys
             move_up = "UP" in keys
