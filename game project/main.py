@@ -1,6 +1,7 @@
 import os
 import sys
 import random
+from time import perf_counter, sleep
 from functools import lru_cache
 from ipaddress import IPv4Address
 import pygame
@@ -432,7 +433,18 @@ elif start_env == "join":
     game_state = STATE_JOIN_INPUT
 
 
+def tick_frame(target_fps):
+    global next_frame_at
+    now = perf_counter()
+    # Tính đến hạn hiển thị kế tiếp. Khi frame đã trễ thì tiếp tục ngay.
+    next_frame_at = max(next_frame_at + 1 / target_fps, now)
+    if next_frame_at > now:
+        sleep(next_frame_at - now)
+    return clock.tick(0)
+
+
 clock = pygame.time.Clock()
+next_frame_at = perf_counter()
 while running:
     frame_start_state = game_state
     # Tính toán viewport thích ứng độ phân giải
@@ -1124,10 +1136,14 @@ while running:
     # Render màn hình thực tế (Co giãn canvas ảo vào giữa cửa sổ)
     if frame_window_size == screen.get_size():
         screen.fill((15, 15, 20))
-        screen.blit(pygame.transform.scale(canvas, view_size), (offset_x, offset_y))
+        if view_size == canvas.get_size():
+            screen.blit(canvas, (offset_x, offset_y))
+        else:
+            viewport_rect = (offset_x, offset_y, view_w, view_h)
+            pygame.transform.scale(canvas, view_size, screen.subsurface(viewport_rect))
         screen.blit(ui.surface, (offset_x, offset_y))
         pygame.display.flip()
-    elapsed_ms = clock.tick(FPS)
+    elapsed_ms = tick_frame(FPS)
     if game_state != STATE_PLAYING:
         frame_ms = 0
         pending_game_ms = 0
