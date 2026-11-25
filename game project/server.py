@@ -58,6 +58,7 @@ class CoopHost:
         self._play_context = None
         self._fire_phase = 0
         self._shot_pending = False
+        self._upgrade_request = None
         self._last_input_at = 0.0
         self._state_to_send = None
         self._changed = threading.Condition()
@@ -112,6 +113,18 @@ class CoopHost:
                         if type(phase) is int and self._play_context is not None and phase == self._fire_phase:
                             self._shot_pending = True
                     continue
+                if "upgrade" in message:
+                    request = message["upgrade"]
+                    if not isinstance(request, dict) or not isinstance(request.get("choice"), str):
+                        continue
+                    if any(type(request.get(key)) is not int or request[key] <= 0
+                           for key in ("round", "level", "id")):
+                        continue
+                    with self._changed:
+                        if self.client_conn is not conn:
+                            return
+                        self._upgrade_request = request
+                    continue
                 move = message.get("move")
                 shoot = message.get("shoot")
                 if not isinstance(move, list) or len(move) > 4 or type(shoot) is not bool:
@@ -161,6 +174,7 @@ class CoopHost:
         self.client_input = NEUTRAL_INPUT
         self._play_context = None
         self._shot_pending = False
+        self._upgrade_request = None
         self._last_input_at = 0.0
         self._state_to_send = None
 
@@ -188,6 +202,14 @@ class CoopHost:
                     self._shot_pending = False
                 self._state_to_send = dict(state_dict, fire_phase=self._fire_phase)
                 self._changed.notify_all()
+
+    def take_upgrade_request(self, conn):
+        with self._changed:
+            if conn is None or conn is not self.client_conn:
+                return None
+            request = self._upgrade_request
+            self._upgrade_request = None
+            return request
 
     def stop(self):
         with self._changed:

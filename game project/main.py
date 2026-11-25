@@ -10,7 +10,7 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 
-from player import Player
+from player import Player, UPGRADES, upgrade_price
 from enemy import Enemy
 from bullet import Bullet
 from explosion import Explosion
@@ -23,7 +23,7 @@ from utils import (
     get_asset_path, get_cached_image, get_local_ip, load_level_config,
     get_auto_resolution, current_desktop, apply_display_mode, calculate_viewport, screen_to_canvas,
     UI_ACCENT, UI_BORDER, UIFrame, draw_panel, draw_notice, draw_hud, draw_enemy_health,
-    show_setting, show_menu, show_host_waiting, show_join_prompt, show_gameover
+    show_setting, show_menu, show_host_waiting, show_join_prompt, show_gameover, show_upgrade_shop
 )
 
 # pyright: reportArgumentType=false
@@ -109,6 +109,7 @@ STATE_JOIN_INPUT = "join_input"
 STATE_PLAYING = "playing"
 STATE_GAMEOVER = "gameover"
 STATE_SETTING = "setting"
+STATE_UPGRADE = "upgrade"
 game_state = STATE_MENU
 setting_return_state = STATE_MENU
 
@@ -126,8 +127,16 @@ host_status_msg = ""
 # Biến game
 score = 0
 level = 1
-frame_count = 0
-max_health = 10
+FIRST_SPAWN_FRAMES = 36
+STAGE_BREAK_FRAMES = 84
+POINTS_PER_CREDIT = 10
+spawn_in_frames = FIRST_SPAWN_FRAMES
+spawned_enemies = 0
+stage_start_score = 0
+last_stage_points = None
+last_guest_upgrade_id = 0
+client_upgrade_id = 0
+pending_upgrade_id = None
 HEALTH_FLASH_DURATION = 15  # frame
 
 # Nhóm đối tượng
@@ -137,8 +146,7 @@ bullets = pygame.sprite.Group()
 enemies = pygame.sprite.Group()
 explosions = pygame.sprite.Group()
 boss_group = pygame.sprite.Group()
-boss_spawned = False
-last_boss_level = 0
+boss_defeated = False
 
 # Load level
 loaded_background = None
@@ -152,18 +160,24 @@ GEAR_HOVER_IMG.fill((30, 30, 30), special_flags=pygame.BLEND_RGB_ADD)
 ui = None
 
 def reset_game(mode="single"):
-    global round_number, score, player, player2, bullets, enemies, explosions
-    global frame_count, loaded_background, loaded_level_number
-    global boss_group, boss_spawned, last_boss_level, play_mode
+    global score, level, player, player2, loaded_background, loaded_level_number
+    global spawn_in_frames, spawned_enemies, stage_start_score, last_stage_points
+    global boss_defeated, play_mode, round_number
+    global last_guest_upgrade_id, pending_upgrade_id
     play_mode = mode
-    recent_explosions.clear()
-    round_number += 1
     score = 0
-    frame_count = 0
+    level = 1
+    spawn_in_frames = FIRST_SPAWN_FRAMES
+    spawned_enemies = 0
+    stage_start_score = 0
+    last_stage_points = None
+    last_guest_upgrade_id = 0
+    pending_upgrade_id = None
     loaded_background = None
     loaded_level_number = None
-    boss_spawned = False
-    last_boss_level = 0
+    boss_defeated = False
+    round_number += 1
+    recent_explosions.clear()
     boss_group.empty()
     bullets.empty()
     enemies.empty()
@@ -175,6 +189,46 @@ def reset_game(mode="single"):
     else:
         player = Player(x=WIDTH // 2 - 25, y=850)
         player2 = None
+
+
+def spawn_enemy(config, spawn_pos=None):
+    enemies.add(Enemy(config.enemy_speed, WIDTH, HEIGHT, spawn_pos,
+                      health=config.enemy_health, contact_damage=config.enemy_contact_damage,
+                      score_value=config.enemy_score))
+
+
+def stage_status():
+    if last_stage_points is not None:
+        return {"previous_points": last_stage_points}
+    if level % 5:
+        target = load_level_config(level).enemy_count
+        return {"remaining": target - spawned_enemies + len(enemies)}
+    return {}
+
+
+def shop_offers(shop):
+    offers = []
+    for key, (_, change, _cost, unit) in UPGRADES.items():
+        current = shop["stats"][key]
+        rank = shop["ranks"][key]
+        offers.append((key, current, current + change, unit, rank, upgrade_price(key, rank)))
+    return offers
+
+
+def choose_upgrade(action):
+    global game_state, client_upgrade_id, pending_upgrade_id
+    if action == "continue":
+        if play_mode != "client":
+            game_state = STATE_PLAYING
+    elif action in UPGRADES:
+        if play_mode == "client":
+            state = coop_client.get_latest_state()
+            if pending_upgrade_id is None and state and state.get("shop"):
+                client_upgrade_id += 1
+                if coop_client.send_upgrade(state["round"], state["level"], client_upgrade_id, action):
+                    pending_upgrade_id = client_upgrade_id
+        else:
+            player.buy_upgrade(action)
 
 # Biến điều hướng UI & Cài đặt
 running = True
@@ -393,7 +447,6 @@ while running:
     mouse_pos = screen_to_canvas(raw_mouse, offset_x, offset_y, ui.scale_x, ui.scale_y)
     fps_display = clock.get_fps() if settings.get("show_fps") else None
 
-    level = score // 100 + 1
     level_data = load_level_config(level)
 
     if loaded_level_number != level:
@@ -403,12 +456,23 @@ while running:
             loaded_background = get_cached_image(bg_filename, size=(WIDTH, HEIGHT), convert_alpha=False)
         loaded_level_number = level
 
-    if play_mode == "client" and game_state in (STATE_PLAYING, STATE_GAMEOVER, STATE_SETTING):
+    if play_mode == "client" and game_state in (STATE_PLAYING, STATE_GAMEOVER, STATE_SETTING, STATE_UPGRADE):
         if not coop_client.connected:
             coop_client.stop()
             join_error_msg = "Mất kết nối với Chủ phòng!"
             game_state = STATE_JOIN_INPUT
-    if (play_mode == "host" and game_state in (STATE_PLAYING, STATE_GAMEOVER, STATE_SETTING)
+        else:
+            host_state = coop_client.get_latest_state()
+            if host_state and host_state.get("shop"):
+                if game_state != STATE_UPGRADE:
+                    coop_client.send_input([], False)
+                    slider_drag = None
+                    waiting_for_key = None
+                game_state = STATE_UPGRADE
+            elif host_state and game_state == STATE_UPGRADE:
+                pending_upgrade_id = None
+                game_state = STATE_GAMEOVER if host_state["game_state"] == STATE_GAMEOVER else STATE_PLAYING
+    if (play_mode == "host" and game_state in (STATE_PLAYING, STATE_GAMEOVER, STATE_SETTING, STATE_UPGRADE)
             and active_client_conn is not coop_host.client_conn):
         host_status_msg = "P2 đã rời. Đang chờ khách mới."
         game_state = STATE_HOST_WAIT
@@ -462,6 +526,29 @@ while running:
             width=WIDTH, height=HEIGHT, can_restart=play_mode != "client",
             save_failed=settings_save_failed, caption_font=caption_font,
             room_ip=room_ip
+        )
+
+    elif game_state == STATE_UPGRADE:
+        if play_mode == "client":
+            shop = host_state["shop"]
+            level = host_state["level"]
+            score = host_state["score"]
+            finished_points = host_state.get("stage", {}).get("previous_points", 0)
+            if pending_upgrade_id is not None and shop["ack"] >= pending_upgrade_id:
+                pending_upgrade_id = None
+        else:
+            if play_mode == "host":
+                request = coop_host.take_upgrade_request(active_client_conn)
+                if (request and request["round"] == round_number and request["level"] == level
+                        and request["id"] > last_guest_upgrade_id):
+                    player2.buy_upgrade(request["choice"])
+                    last_guest_upgrade_id = request["id"]
+            shop = player.shop_status()
+            finished_points = last_stage_points or 0
+        screen_actions = show_upgrade_shop(
+            ui, font, big_font, caption_font, shop, shop_offers(shop), level - 1,
+            finished_points, finished_points // POINTS_PER_CREDIT, play_mode != "client",
+            pending=pending_upgrade_id is not None, mouse_pos=mouse_pos,
         )
 
     elif game_state == STATE_GAMEOVER:
@@ -524,6 +611,10 @@ while running:
                 for ex, ey in st.get("enemies", []):
                     e_rect = ENEMY_IMG.get_rect(center=(ex, ey)).move(shake_offset)
                     canvas.blit(ENEMY_IMG, e_rect)
+                for ex, ey, hp, max_hp in st.get("armored_enemies", []):
+                    e_rect = ENEMY_IMG.get_rect(center=(ex, ey)).move(shake_offset)
+                    draw_enemy_health(ui, e_rect, hp, max_hp)
+
                 boss_info = st.get("boss")
                 boss_status = None
                 if boss_info:
@@ -589,72 +680,89 @@ while running:
 
             bullets.update()
             explosions.update()
-            enemies.update()
-            frame_count += 1
+            escaped = 0
+            for enemy in enemies:
+                enemy.update()
+                escaped += enemy.missed
+            if escaped:
+                # Cùng luật ở Chơi đơn và Co-op. Client nhận HP do Host tính.
+                damage_player(player, escaped)
+                damage_player(player2, escaped)
+            spawn_in_frames = max(0, spawn_in_frames - 1)
 
-            # Kiểm tra màn Boss (Mỗi 5 cấp độ: Level 5, 10, 15... trong chế độ Endless)
-            is_boss_stage = (level % 5 == 0) and (last_boss_level != level)
-            if is_boss_stage:
-                if not boss_spawned:
-                    boss_tier = level // 5
-                    boss = Boss(WIDTH, HEIGHT, boss_tier=boss_tier)
-                    boss_group.add(boss)
-                    boss_spawned = True
+            # Boss ở mỗi màn chia hết cho 5. Điểm không đẩy trận sang màn khác.
+            boss_stage = level % 5 == 0
+            if boss_stage and spawn_in_frames <= 0 and not boss_defeated and not boss_group:
+                boss_group.add(Boss(WIDTH, HEIGHT, boss_tier=level // 5))
+                last_stage_points = None
 
-                boss_group.update()
+            if boss_group:
+                boss_group.update(min(frame_ms, 50))
                 for b in list(boss_group):
                     if b.spawn_enemy:
                         if len(enemies) < level_data.max_enemies:
-                            enemies.add(Enemy(level_data.enemy_speed, WIDTH, HEIGHT,
-                                              spawn_pos=(b.rect.centerx, b.rect.bottom)))
+                            spawn_enemy(level_data, (b.rect.centerx, b.rect.bottom))
                         b.spawn_enemy = False
 
                     if player.health > 0 and pygame.sprite.spritecollide(player, b.bullets, True):
-                        damage_player(player, 1)
+                        damage_player(player, b.attack_damage)
                     if play_mode == "host" and player2 and player2.health > 0:
                         if pygame.sprite.spritecollide(player2, b.bullets, True):
-                            damage_player(player2, 1)
+                            damage_player(player2, b.attack_damage)
 
                     if player.health > 0 and b.rect.colliderect(player.rect) and player.flash_timer == 0:
-                        damage_player(player, 1)
+                        damage_player(player, b.attack_damage)
                     if play_mode == "host" and player2 and player2.health > 0 and b.rect.colliderect(player2.rect) and player2.flash_timer == 0:
-                        damage_player(player2, 1)
+                        damage_player(player2, b.attack_damage)
 
                 hits = pygame.sprite.groupcollide(boss_group, bullets, False, True)
                 for b, hit_bullets in hits.items():
-                    b.take_damage(10 * len(hit_bullets))
+                    b.take_damage(sum(bullet.damage for bullet in hit_bullets))
                     if b.health <= 0:
                         record_explosion(b.rect.center)
                         boss_group.remove(b)
-                        boss_spawned = False
-                        last_boss_level = level
-                        score += 200
-                        player.health = min(max_health, player.health + 3)
+                        boss_defeated = True
+                        score += b.score_value
+                        player.health = min(player.max_health, player.health + 3)
                         if play_mode == "host" and player2:
-                            player2.health = min(max_health, player2.health + 3)
-            else:
-                if frame_count >= level_data.enemy_spawn_rate:
-                    if len(enemies) < level_data.max_enemies:
-                        enemies.add(Enemy(level_data.enemy_speed, WIDTH, HEIGHT))
-                    frame_count = 0
+                            player2.health = min(player2.max_health, player2.health + 3)
+            elif (not boss_stage and spawn_in_frames <= 0
+                  and spawned_enemies < level_data.enemy_count and len(enemies) < level_data.max_enemies):
+                spawn_enemy(level_data)
+                spawned_enemies += 1
+                spawn_in_frames = level_data.enemy_spawn_rate
+                last_stage_points = None
 
-            hits = pygame.sprite.groupcollide(enemies, bullets, True, True)
-            for hit in hits:
-                score += 10
-                record_explosion(hit.rect.center)
+            hits = pygame.sprite.groupcollide(enemies, bullets, False, True)
+            for enemy, hit_bullets in hits.items():
+                enemy.health -= sum(bullet.damage for bullet in hit_bullets)
+                if enemy.health <= 0:
+                    enemy.kill()
+                    score += enemy.score_value
+                    record_explosion(enemy.rect.center)
 
-            if player.health > 0 and pygame.sprite.spritecollide(player, enemies, True):
-                damage_player(player, 1)
-            if play_mode == "host" and player2 and player2.health > 0:
-                if pygame.sprite.spritecollide(player2, enemies, True):
-                    damage_player(player2, 1)
+            for ship in (player, player2):
+                if ship and ship.health > 0:
+                    touched = pygame.sprite.spritecollide(ship, enemies, True)
+                    if touched:
+                        damage_player(ship, max(enemy.contact_damage for enemy in touched))
 
-            if play_mode == "host" and player2:
-                if player.health <= 0 and player2.health <= 0:
-                    game_state = STATE_GAMEOVER
-            else:
-                if player.health <= 0:
-                    game_state = STATE_GAMEOVER
+            wave_finished = boss_defeated if boss_stage else spawned_enemies >= level_data.enemy_count
+            if player.health <= 0 and (player2 is None or player2.health <= 0):
+                game_state = STATE_GAMEOVER
+            elif wave_finished and not enemies:
+                last_stage_points = score - stage_start_score
+                reward = last_stage_points // POINTS_PER_CREDIT
+                player.credits += reward
+                if player2:
+                    player2.credits += reward
+                stage_start_score = score
+                level += 1
+                spawned_enemies = 0
+                boss_defeated = False
+                spawn_in_frames = STAGE_BREAK_FRAMES
+                bullets.empty()
+                game_state = STATE_UPGRADE
 
             p1_flash = player.flash_timer > 0
             p2_flash = bool(player2 and player2.flash_timer > 0)
@@ -678,6 +786,8 @@ while running:
             for sprite in enemies:
                 enemy_rect = sprite.rect.move(shake_offset)
                 canvas.blit(sprite.image, enemy_rect)
+                if sprite.max_health > 10:
+                    draw_enemy_health(ui, enemy_rect, sprite.health, sprite.max_health)
             boss_status = None
             for b in boss_group:
                 b.draw(canvas)
@@ -689,7 +799,7 @@ while running:
                 player_rect=p1_rect_offset, flash_health=p1_flash,
                 p2_rect=p2_rect_offset, p2_health=player2.health if player2 else None,
                 p2_max_health=player2.max_health if player2 else 10, p2_flash=p2_flash, fps_value=fps_display,
-                caption_font=caption_font, boss_status=boss_status, stage=None
+                caption_font=caption_font, boss_status=boss_status, stage=stage_status()
             )
 
         # Vẽ icon bánh răng góc trên phải
@@ -801,6 +911,16 @@ while running:
                             join_ip_selected = False
                         if len(join_ip_text) < 21:
                             join_ip_text += character
+
+            elif game_state == STATE_UPGRADE:
+                if event.key == pygame.K_ESCAPE:
+                    return_to_menu()
+                elif event.key in (pygame.K_1, pygame.K_2, pygame.K_3):
+                    action = tuple(UPGRADES)[event.key - pygame.K_1]
+                    if action in screen_actions:
+                        choose_upgrade(action)
+                elif event.key == pygame.K_RETURN and "continue" in screen_actions:
+                    choose_upgrade("continue")
 
             elif game_state == STATE_GAMEOVER:
                 if event.key == pygame.K_SPACE:
@@ -917,6 +1037,8 @@ while running:
                     join_ip_selected = bool(join_ip_text)
                 elif action == "copy_ip":
                     copy_coop_ip(local_lan_ip)
+                elif game_state == STATE_UPGRADE and action:
+                    choose_upgrade(action)
                 elif action == "restart":
                     reset_game(mode=play_mode)
                     game_state = STATE_PLAYING
@@ -936,7 +1058,7 @@ while running:
     if play_mode == "client" and state_before_events == STATE_PLAYING and game_state == STATE_SETTING:
         coop_client.send_input([], False)
 
-    if play_mode == "host" and game_state in (STATE_PLAYING, STATE_GAMEOVER, STATE_SETTING):
+    if play_mode == "host" and game_state in (STATE_PLAYING, STATE_GAMEOVER, STATE_SETTING, STATE_UPGRADE):
         active_boss = next(iter(boss_group), None)
         boss_payload = None
         boss_bullets_payload = []
@@ -957,7 +1079,8 @@ while running:
             "round": round_number,
             "score": score,
             "level": level,
-            "game_state": game_state,
+            "stage": stage_status(),
+            "game_state": STATE_SETTING if game_state == STATE_UPGRADE else game_state,
             "p1": {
                 "x": player.rect.x,
                 "y": player.rect.y,
@@ -974,10 +1097,14 @@ while running:
             },
             "bullets": [[b.rect.centerx, b.rect.centery] for b in bullets],
             "enemies": [[e.rect.centerx, e.rect.centery] for e in enemies],
+            "armored_enemies": [[e.rect.centerx, e.rect.centery, e.health, e.max_health]
+                                for e in enemies if e.max_health > 10],
             "boss": boss_payload,
             "boss_bullets": boss_bullets_payload,
             "explosions": recent_explosions.copy()
         }
+        if game_state == STATE_UPGRADE:
+            snapshot["shop"] = dict(player2.shop_status(), ack=last_guest_upgrade_id)
         coop_host.send_state(snapshot, active_client_conn)
 
     # Render màn hình thực tế (Co giãn canvas ảo vào giữa cửa sổ)

@@ -3,7 +3,8 @@ import random
 from utils import get_cached_image, BASE_WIDTH, BASE_HEIGHT
 
 class Enemy(pygame.sprite.Sprite):
-    def __init__(self, speed, max_x=BASE_WIDTH, max_y=BASE_HEIGHT, spawn_pos=None):
+    def __init__(self, speed, max_x=BASE_WIDTH, max_y=BASE_HEIGHT, spawn_pos=None, *,
+                 health=10, contact_damage=1, score_value=10):
         super().__init__()
         self.max_y = max_y
         self.image = get_cached_image("enemy.png", size=(40, 40), convert_alpha=True)
@@ -15,10 +16,16 @@ class Enemy(pygame.sprite.Sprite):
             self.rect = self.image.get_rect(center=(spawn_x, -40))
             
         self.speed = speed
+        self.health = health
+        self.max_health = health
+        self.contact_damage = contact_damage
+        self.score_value = score_value
+        self.y = float(self.rect.y)
         self.missed = False  
 
     def update(self):
-        self.rect.y += self.speed
-        if self.rect.top > self.max_y:
+        self.y += self.speed
+        self.rect.y = round(self.y)
+        if self.rect.top >= self.max_y:
             self.missed = True   
             self.kill()

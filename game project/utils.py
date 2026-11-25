@@ -113,6 +113,7 @@ def get_local_ip():
     except Exception:
         return "127.0.0.1"
 
+@lru_cache(maxsize=32)
 def load_level_config(level_num):
     """
     Nạp cấu hình màn chơi từ level1..level5.
@@ -126,12 +127,17 @@ def load_level_config(level_num):
     else:
         base = importlib.import_module('level.level5')
         extra = level_num - 5
+        boss_stage = level_num % 5 == 0
+        health = base.enemy_health + extra * 2 + extra * extra // 30
         return SimpleNamespace(
             level_number=level_num,
-            enemy_speed=min(4.5, round(base.enemy_speed + extra * 0.15, 2)),
-            enemy_spawn_rate=max(6, base.enemy_spawn_rate - extra),
-            max_enemies=min(35, base.max_enemies + extra * 2),
-            shoot_cooldown=max(220, base.shoot_cooldown - extra * 15),
+            enemy_speed=min(260, round(base.enemy_speed * 100) + extra * 8) / 100,
+            enemy_spawn_rate=max(60, base.enemy_spawn_rate - extra * 2),
+            enemy_count=0 if boss_stage else min(16, 10 + extra // 2),
+            max_enemies=2 if boss_stage else min(5, 4 + extra // 5),
+            enemy_health=health,
+            enemy_contact_damage=1 + (level_num - 1) // 5,
+            enemy_score=20 + extra * 2,
             background_color=base.background_color,
             background_image_path=base.background_image_path
         )
@@ -500,6 +506,23 @@ def show_gameover(screen, font, big_font, width=BASE_WIDTH, height=BASE_HEIGHT, 
     return actions
 
 
+UPGRADE_ICONS = {
+    "damage": (
+        (240, 119, 108),
+        ((19, 2), (24, 1), (23, 6), (13, 16), (16, 19), (14, 21),
+         (11, 18), (6, 23), (2, 24), (3, 20), (8, 15), (5, 12), (7, 10), (10, 13)),
+    ),
+    "fire_rate": (
+        (255, 211, 108),
+        ((14, 1), (5, 13), (11, 13), (8, 24), (22, 10), (15, 10), (19, 1)),
+    ),
+    "armor": (
+        UI_ACCENT,
+        ((12, 1), (22, 5), (21, 14), (18, 19), (12, 24), (6, 19), (3, 14), (2, 5)),
+    ),
+}
+
+
 def compact_count(value):
     digits = str(value)
     if len(digits) <= 5:
@@ -512,6 +535,50 @@ def compact_count(value):
     whole = digits[:leading + 1]
     fraction = digits[leading + 1]
     return f"{whole}.{fraction}{unit}" if fraction != "0" else f"{whole}{unit}"
+
+
+def show_upgrade_shop(screen, font, big_font, caption_font, shop, offers, completed_level,
+                      stage_points, reward, can_continue, pending=False, mouse_pos=None):
+    card = draw_screen_card(screen, big_font, "Nâng cấp tàu", 202, 510)
+    x, w = card.x + 18, card.w - 36
+    summary = f"Màn {compact_count(completed_level)} · {compact_count(stage_points)} điểm · +{compact_count(reward)} xu"
+    screen.text(caption_font, summary, (x, card.y + 78), UI_MUTED)
+    screen.text(font, f"Số dư {compact_count(shop['credits'])} xu", (x, card.y + 113), UI_ACCENT)
+
+    actions = {}
+    for i, (upgrade, current, upgraded, unit, rank, price) in enumerate(offers):
+        row = pygame.Rect(x, card.y + 150 + i * 77, w, 68)
+        enabled = shop["credits"] >= price and not pending
+        hovered = bool(mouse_pos and row.collidepoint(mouse_pos))
+        draw_button(screen, row, "", font, hovered=hovered, disabled=not enabled)
+        color, points = UPGRADE_ICONS[upgrade]
+        icon = pygame.Rect(row.x + 10, row.y + 10, 48, 48)
+        draw_panel(screen, icon, border=color, radius=8)
+        screen.polygon(color, [(icon.x + 12 + ix, icon.y + 12 + iy) for ix, iy in points])
+        stat_text = f"{compact_count(current)} → {compact_count(upgraded)}"
+        screen.text(font, stat_text, (row.x + 69, row.y + 9), UI_TEXT)
+        screen.text(caption_font, f"{unit} · Bậc {compact_count(rank)}",
+                    (row.x + 69, row.y + 37), UI_MUTED)
+        screen.text(font, f"{compact_count(price)} xu", (row.right - 12, row.y + 13),
+                    color if enabled else UI_MUTED, anchor="topright")
+        shortcut = pygame.Rect(row.right - 33, row.y + 40, 21, 21)
+        draw_panel(screen, shortcut, radius=4)
+        screen.text(caption_font, str(i + 1), shortcut.center, UI_MUTED, anchor="center")
+        if enabled:
+            actions[upgrade] = row
+
+    proceed = pygame.Rect(x, card.bottom - 111, w, 48)
+    if can_continue:
+        draw_button(screen, proceed, "Vào màn tiếp", font, selected=True, detail="Enter",
+                    hovered=bool(mouse_pos and proceed.collidepoint(mouse_pos)))
+        actions["continue"] = proceed
+    else:
+        draw_notice(screen, proceed, "Đang mua…" if pending else "Chờ chủ phòng bắt đầu", font)
+    back = pygame.Rect(x, card.bottom - 53, w, 37)
+    draw_button(screen, back, "Về menu", caption_font, detail="Esc",
+                hovered=bool(mouse_pos and back.collidepoint(mouse_pos)))
+    actions["back"] = back
+    return actions
 
 
 def draw_slider(surface, rect, value, label, selected, hovered, font):

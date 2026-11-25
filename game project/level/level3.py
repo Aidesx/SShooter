@@ -1,7 +1,10 @@
 level_number = 3
-enemy_speed = 1.2
-enemy_spawn_rate = 25
-max_enemies = 12
-shoot_cooldown = 500
+enemy_speed = 1.5
+enemy_spawn_rate = 84
+enemy_count = 9
+max_enemies = 4
+enemy_health = 12
+enemy_contact_damage = 1
+enemy_score = 10
 background_color = (220, 220, 255)
-background_image_path = "assets/background.png" 
+background_image_path = "assets/background.png"
