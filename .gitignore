@@ -19,3 +19,19 @@ Thumbs.db
 # User local settings
 game project/settings.json
 
+# Local documentation and agent tooling (only the root README.md is public).
+[Dd][Oo][Cc][Ss]/
+[Ss][Kk][Ii][Ll][Ll][Ss]/
+.skills/
+.agents/
+.codex/
+.code-review-graph/
+*.[mM][dD]
+*.[mM][dD][xX]
+*.[rR][sS][tT]
+*.[aA][dD][oO][cC]
+*.[dD][oO][cC]
+*.[dD][oO][cC][xX]
+*.[pP][dD][fF]
+!/README.md
+
