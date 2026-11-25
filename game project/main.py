@@ -42,6 +42,8 @@ pygame.display.set_caption("Bắn máy bay")
 pygame.display.set_icon(get_cached_image("icon.png", convert_alpha=True))
 
 FPS = 60
+frame_ms = 0
+
 # Âm thanh
 explode_sound = shoot_sound = None
 if pygame.mixer.get_init():
@@ -178,6 +180,7 @@ def reset_game(mode="single"):
 running = True
 window_focused = True
 pending_modifier = None
+held_shoot_key = None
 MODIFIER_KEYS = {
     pygame.K_LCTRL: pygame.KMOD_CTRL, pygame.K_RCTRL: pygame.KMOD_CTRL,
     pygame.K_LSHIFT: pygame.KMOD_SHIFT, pygame.K_RSHIFT: pygame.KMOD_SHIFT,
@@ -253,6 +256,14 @@ def gameplay_keys():
         if sum(keys) != 1 or not any(keys[key] for key in MODIFIER_KEYS):
             return None
     return keys
+
+def fire_ship(ship):
+    shot = ship.shoot()
+    if shot is not None:
+        bullets.add(shot)
+        if shoot_sound:
+            shoot_sound.play()
+
 
 def record_explosion(center_pos):
     global explosion_seq, recent_explosions
@@ -365,6 +376,7 @@ elif start_env == "join":
 
 clock = pygame.time.Clock()
 while running:
+    frame_start_state = game_state
     # Tính toán viewport thích ứng độ phân giải
     window_w, window_h = screen.get_size()
     view_w, view_h, offset_x, offset_y, scale = calculate_viewport(window_w, window_h, WIDTH, HEIGHT)
@@ -403,6 +415,7 @@ while running:
 
     # ==================== XỬ LÝ TỪNG TRẠNG THÁI ====================
     screen_actions = {}
+    guest_fire_phase = None
     if loaded_background:
         canvas.blit(loaded_background, (0, 0))
     else:
@@ -477,8 +490,10 @@ while running:
             if host_paused or not window_focused:
                 coop_client.send_input([], False)
             else:
-                coop_client.send_input(move_cmds, bool(keys is not None and (settings["auto_fire"] or keys[k_cfg["shoot"]])))
+                coop_client.send_input(move_cmds, False)
             if st:
+                if st["game_state"] == STATE_PLAYING and st["p2"]["hp"] > 0:
+                    guest_fire_phase = st.get("fire_phase")
                 score = st.get("score", score)
                 level = st.get("level", level)
                 if st.get("game_state") == STATE_GAMEOVER:
@@ -554,32 +569,26 @@ while running:
         # -------------------- NHÁNH 2: CHƠI ĐƠN HOẶC CHỦ PHÒNG (HOST) --------------------
         else:
             keys = gameplay_keys()
-            current_time = pygame.time.get_ticks()
+            player.tick_weapon(frame_ms)
+            guest_move = []
+            if play_mode == "host" and player2 is not None:
+                guest_move = coop_host.get_client_input().get("move", [])
+                player2.tick_weapon(frame_ms)
+                if coop_host.take_shot():
+                    fire_ship(player2)
 
-            # Điều khiển Player 1 (Sử dụng Custom Keybindings + Auto-Fire)
             if player.health > 0 and keys is not None:
                 player.handle_input(keys, WIDTH, HEIGHT, key_bindings=k_cfg)
-                want_shoot_p1 = settings["auto_fire"] or keys[k_cfg["shoot"]]
-                if want_shoot_p1 and (current_time - player.last_shot_time >= level_data.shoot_cooldown):
-                    bullets.add(player.shoot())
-                    if shoot_sound:
-                        shoot_sound.play()
-                    player.last_shot_time = current_time
             player.update()
 
             # Điều khiển Player 2 (nếu ở chế độ Host Co-op)
             if play_mode == "host" and player2 is not None:
-                c_input = coop_host.get_client_input()
                 if player2.health > 0:
-                    player2.handle_input(c_input.get("move", []), WIDTH, HEIGHT)
-                    if c_input.get("shoot") and (current_time - player2.last_shot_time >= level_data.shoot_cooldown):
-                        bullets.add(player2.shoot())
-                        if shoot_sound:
-                            shoot_sound.play()
-                        player2.last_shot_time = current_time
+                    player2.handle_input(guest_move, WIDTH, HEIGHT)
                 player2.update()
 
             bullets.update()
+            explosions.update()
             enemies.update()
             frame_count += 1
 
@@ -699,10 +708,13 @@ while running:
         elif event.type == pygame.WINDOWFOCUSLOST:
             window_focused = False
             pending_modifier = None
+            held_shoot_key = None
             if play_mode == "client":
                 coop_client.send_input([], False)
         elif event.type == pygame.WINDOWFOCUSGAINED:
             window_focused = True
+            shoot_key = settings["keys"]["shoot"]
+            held_shoot_key = shoot_key if pygame.key.get_pressed()[shoot_key] else None
 
         elif event.type == pygame.VIDEORESIZE:
             if not settings.get("fullscreen") and (window_w, window_h) == frame_window_size:
@@ -714,12 +726,17 @@ while running:
 
         elif event.type in (pygame.KEYDOWN, pygame.KEYUP):
             mods = getattr(event, "mod", 0) & (SYSTEM_SHORTCUT_MODS | pygame.KMOD_SHIFT)
+            repeated_shot = event.key == held_shoot_key or getattr(event, "repeat", False)
             if event.type == pygame.KEYUP:
+                if event.key == held_shoot_key:
+                    held_shoot_key = None
                 if event.key != pending_modifier:
                     continue
                 pending_modifier = None
                 mods &= ~MODIFIER_KEYS[event.key]
             else:
+                if event.key == settings["keys"]["shoot"]:
+                    held_shoot_key = event.key
                 pending_modifier = None
                 if event.key in MODIFIER_KEYS:
                     # Chờ nhả phím để phân biệt Ctrl/Shift/Win riêng với một tổ hợp.
@@ -801,6 +818,13 @@ while running:
                     slider_drag = None
                     setting_return_state = STATE_PLAYING
                     game_state = STATE_SETTING
+                elif (window_focused and event.key == settings["keys"]["shoot"]
+                      and (event.type == pygame.KEYUP or not repeated_shot)):
+                    if play_mode == "client":
+                        if guest_fire_phase is not None:
+                            coop_client.request_shot(guest_fire_phase)
+                    else:
+                        fire_ship(player)
 
             elif game_state == STATE_SETTING:
                 # Nếu đang chờ người dùng nhấn phím mới để gán (Key Rebinding)
@@ -904,6 +928,11 @@ while running:
             c_pos = screen_to_canvas(event.pos, offset_x, offset_y, ui.scale_x, ui.scale_y)
             set_slider_from_mouse(slider_drag, c_pos[0])
 
+    entered_play = game_state == STATE_PLAYING and (
+        frame_start_state != STATE_PLAYING or state_before_events != STATE_PLAYING
+    )
+    if entered_play:
+        resumed_at = pygame.time.get_ticks()
     if play_mode == "client" and state_before_events == STATE_PLAYING and game_state == STATE_SETTING:
         coop_client.send_input([], False)
 
@@ -957,7 +986,14 @@ while running:
         screen.blit(pygame.transform.scale(canvas, view_size), (offset_x, offset_y))
         screen.blit(ui.surface, (offset_x, offset_y))
         pygame.display.flip()
-    clock.tick(FPS)
+    elapsed_ms = clock.tick(FPS)
+    if game_state != STATE_PLAYING:
+        frame_ms = 0
+    elif entered_play:
+        # Chỉ tính phần của frame sau khi bắt đầu hoặc tiếp tục trận.
+        frame_ms = min(elapsed_ms, pygame.time.get_ticks() - resumed_at)
+    else:
+        frame_ms = elapsed_ms
 
 coop_host.stop()
 coop_client.stop()

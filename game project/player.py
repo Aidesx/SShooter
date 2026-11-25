@@ -11,7 +11,8 @@ class Player(pygame.sprite.Sprite):
         self.speed = 5
         self.health = 10
         self.max_health = 10
-        self.last_shot_time = 0
+        self.shoot_cooldown = 350
+        self.cooldown_left_ms = 0
         self.flash_timer = 0
 
     def handle_input(self, keys, max_w=BASE_WIDTH, max_h=BASE_HEIGHT, key_bindings=None):
@@ -55,6 +56,12 @@ class Player(pygame.sprite.Sprite):
     def draw(self, screen):
         screen.blit(self.image, self.rect)
 
+    def tick_weapon(self, elapsed_ms):
+        self.cooldown_left_ms = max(0, self.cooldown_left_ms - elapsed_ms)
+
     def shoot(self):
         from bullet import Bullet
+        if self.cooldown_left_ms or self.health <= 0:
+            return None
+        self.cooldown_left_ms = self.shoot_cooldown
         return Bullet(self.rect.centerx, self.rect.top)

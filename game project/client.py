@@ -18,7 +18,7 @@ def valid_snapshot(message):
     """Kiểm tra các trường Client dùng để vẽ trước khi nhận snapshot."""
     if message.get("game_state") not in ("playing", "gameover", "setting"):
         return False
-    for name in ("score", "level", "round"):
+    for name in ("score", "level", "round", "fire_phase"):
         if name in message and not is_counter(message[name]):
             return False
     for name in ("p1", "p2"):
@@ -59,6 +59,7 @@ class CoopClient:
         self.connect_error = False
         self.latest_state = None
         self._input_to_send = None
+        self._fire_to_send = None
         self._changed = threading.Condition()
 
     def connect(self, host_ip="127.0.0.1", port=DEFAULT_PORT, timeout=3.0):
@@ -105,11 +106,16 @@ class CoopClient:
                 with self._changed:
                     self._changed.wait_for(
                         lambda: self.sock is not sock or self._input_to_send is not None
+                        or self._fire_to_send is not None
                     )
                     if self.sock is not sock:
                         return
-                    commands = self._input_to_send
-                    self._input_to_send = None
+                    if self._fire_to_send is not None:
+                        commands = {"fire": self._fire_to_send}
+                        self._fire_to_send = None
+                    else:
+                        commands = self._input_to_send
+                        self._input_to_send = None
                 sock.sendall((json.dumps(commands) + "\n").encode("utf-8"))
         except OSError:
             self._disconnect(sock)
@@ -130,6 +136,7 @@ class CoopClient:
         self.connect_error = False
         self.latest_state = None
         self._input_to_send = None
+        self._fire_to_send = None
 
     def get_latest_state(self):
         with self._changed:
@@ -139,6 +146,12 @@ class CoopClient:
         with self._changed:
             if self.connected:
                 self._input_to_send = {"move": list(move_list), "shoot": bool(shoot_bool)}
+                self._changed.notify_all()
+
+    def request_shot(self, phase):
+        with self._changed:
+            if self.connected:
+                self._fire_to_send = phase
                 self._changed.notify_all()
 
     def stop(self):

@@ -55,6 +55,9 @@ class CoopHost:
         self.running = False
         self.connected = False
         self.client_input = NEUTRAL_INPUT
+        self._play_context = None
+        self._fire_phase = 0
+        self._shot_pending = False
         self._last_input_at = 0.0
         self._state_to_send = None
         self._changed = threading.Condition()
@@ -101,6 +104,14 @@ class CoopHost:
     def _receive_loop(self, conn):
         try:
             for message in read_messages(conn, max_line=1024):
+                if "fire" in message:
+                    with self._changed:
+                        if self.client_conn is not conn:
+                            return
+                        phase = message["fire"]
+                        if type(phase) is int and self._play_context is not None and phase == self._fire_phase:
+                            self._shot_pending = True
+                    continue
                 move = message.get("move")
                 shoot = message.get("shoot")
                 if not isinstance(move, list) or len(move) > 4 or type(shoot) is not bool:
@@ -110,6 +121,9 @@ class CoopHost:
                 with self._changed:
                     if self.client_conn is not conn:
                         return
+                    # Older guests transmit a held button. Only its rising edge fires.
+                    if shoot and not self.client_input["shoot"] and self._play_context is not None:
+                        self._shot_pending = True
                     self.client_input = {"move": move, "shoot": shoot}
                     self._last_input_at = monotonic()
         except OSError:
@@ -145,6 +159,8 @@ class CoopHost:
         self.client_addr = None
         self.connected = False
         self.client_input = NEUTRAL_INPUT
+        self._play_context = None
+        self._shot_pending = False
         self._last_input_at = 0.0
         self._state_to_send = None
 
@@ -154,10 +170,23 @@ class CoopHost:
                 return dict(NEUTRAL_INPUT)
             return dict(self.client_input)
 
+    def take_shot(self):
+        with self._changed:
+            pressed = self._shot_pending
+            self._shot_pending = False
+            return pressed
+
     def send_state(self, state_dict, conn=None):
         with self._changed:
             if self.connected and (conn is None or conn is self.client_conn):
-                self._state_to_send = dict(state_dict)
+                context = None
+                if state_dict["game_state"] == "playing":
+                    context = (state_dict.get("round"), state_dict.get("level"))
+                if context != self._play_context:
+                    self._play_context = context
+                    self._fire_phase += 1
+                    self._shot_pending = False
+                self._state_to_send = dict(state_dict, fire_phase=self._fire_phase)
                 self._changed.notify_all()
 
     def stop(self):

@@ -26,7 +26,6 @@ def get_default_settings():
     return {
         "music_volume": 0.5,
         "sfx_volume": 0.5,
-        "auto_fire": False,
         "screen_shake": True,
         "show_fps": False,
         "fullscreen": False,
@@ -53,7 +52,7 @@ def load_settings():
             value = data.get(k)
             if type(value) in (int, float) and 0 <= value <= 1:
                 merged[k] = float(value)
-        for k in ("auto_fire", "screen_shake", "show_fps", "fullscreen"):
+        for k in ("screen_shake", "show_fps", "fullscreen"):
             value = data.get(k)
             if type(value) is bool:
                 merged[k] = value
@@ -557,7 +556,6 @@ def show_setting(screen, font, big_font, settings, active_tab="general",
         rows = [
             ("music_volume", "slider", "Nhạc nền", settings["music_volume"]),
             ("sfx_volume", "slider", "Hiệu ứng âm thanh", settings["sfx_volume"]),
-            ("auto_fire", "toggle", "Tự động bắn", "Bật" if settings["auto_fire"] else "Tắt"),
             ("screen_shake", "toggle", "Rung màn hình", "Bật" if settings["screen_shake"] else "Tắt"),
             ("show_fps", "toggle", "Hiện FPS", "Bật" if settings["show_fps"] else "Tắt"),
             ("fullscreen", "toggle", "Hiển thị", "Toàn màn hình" if settings["fullscreen"] else "Cửa sổ"),
